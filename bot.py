@@ -1,27 +1,24 @@
-# ==================== সম্পূর্ণ একীভূত কোড (Excel-ভিত্তিক) ====================
-# auth.py + db.py (Excel) + bot.py
+# ==================== সম্পূর্ণ কোড (শুধু বিল্ট-ইন লাইব্রেরি) ====================
+# auth.py + db.py (SQLite) + bot.py (urllib দিয়ে)
 
 import time
 import threading
 import math
-import os
+import sqlite3
+import json
+import urllib.request
+import urllib.error
 from collections import deque, Counter
 from typing import Optional, List, Dict, Any
-
-import requests
-import pandas as pd
-from pandas import DataFrame
 
 # ---------- কনফিগারেশন ----------
 API_URL = "https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json?ts={}"
 BOT_TOKEN = "7768747736:AAHRFAiemrbWwo2aCY0geWyBBY385gPJcZ8"   # আপনার টোকেন দিন
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}/"
-EXCEL_FILE = "wingo_30s_data (4).xlsx"
-SHEET_NAME = "All Rounds"
 
 # ==================== auth.py ====================
 AUTHORIZED_USER_IDS = {
-    7237785856,  # আপনার আইডি দিন
+    7237785856,  # ← আপনার টেলিগ্রাম আইডি দিন
     987654321,
 }
 
@@ -37,123 +34,70 @@ def remove_authorized_user(user_id: int) -> None:
     AUTHORIZED_USER_IDS.discard(user_id)
 
 
-# ==================== Excel Data Manager (db.py-র পরিবর্তে) ====================
-class ExcelDataManager:
-    """Excel ফাইলে ডেটা সংরক্ষণ ও পড়ার জন্য ক্লাস"""
-    def __init__(self, file_path: str, sheet_name: str = "All Rounds"):
-        self.file_path = file_path
-        self.sheet_name = sheet_name
-        self._ensure_file_exists()
+# ==================== db.py (SQLite - বিল্ট-ইন) ====================
+def init_db():
+    conn = sqlite3.connect('predictions.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS rounds
+                 (period TEXT PRIMARY KEY, number INTEGER, size TEXT,
+                  prediction TEXT, result TEXT, range_pred TEXT)''')
+    try:
+        c.execute("ALTER TABLE rounds ADD COLUMN range_pred TEXT")
+    except sqlite3.OperationalError:
+        pass
+    conn.commit()
+    conn.close()
 
-    def _ensure_file_exists(self):
-        """ফাইল না থাকলে খালি ডেটাফ্রেম তৈরি করে সেভ করে"""
-        if not os.path.exists(self.file_path):
-            columns = ["Issue", "Number", "Color", "Size", "Premium", "Sum",
-                       "Block ID", "Block Number", "Block Timestamp", "Outcome",
-                       "Running Pattern", "Created At"]
-            df = pd.DataFrame(columns=columns)
-            with pd.ExcelWriter(self.file_path, engine='openpyxl') as writer:
-                df.to_excel(writer, sheet_name=self.sheet_name, index=False)
-            print(f"📁 নতুন এক্সেল ফাইল তৈরি: {self.file_path}")
-
-    def read_all(self) -> pd.DataFrame:
-        """পুরো ডেটা পড়ে DataFrame রিটার্ন করে"""
-        try:
-            df = pd.read_excel(self.file_path, sheet_name=self.sheet_name, dtype=str)
-            # Number কলাম numeric করি
-            if "Number" in df.columns:
-                df["Number"] = pd.to_numeric(df["Number"], errors='coerce')
-            return df
-        except Exception as e:
-            print(f"❌ এক্সেল পড়তে সমস্যা: {e}")
-            return pd.DataFrame()
-
-    def append_row(self, row_data: Dict[str, Any]) -> bool:
-        """একটি নতুন রো অ্যাপেন্ড করে"""
-        try:
-            df = self.read_all()
-            new_row = pd.DataFrame([row_data])
-            df = pd.concat([df, new_row], ignore_index=True)
-            with pd.ExcelWriter(self.file_path, engine='openpyxl', mode='w') as writer:
-                df.to_excel(writer, sheet_name=self.sheet_name, index=False)
-            return True
-        except Exception as e:
-            print(f"❌ এক্সেলে অ্যাপেন্ড করতে সমস্যা: {e}")
-            return False
-
-    def get_last_n(self, n: int) -> pd.DataFrame:
-        """শেষ N টি রো রিটার্ন করে"""
-        df = self.read_all()
-        if len(df) <= n:
-            return df
-        return df.tail(n)
-
-    def get_all_numbers(self) -> List[int]:
-        """সব Number কলামের ডেটা লিস্ট আকারে রিটার্ন করে (শেষ ৩০০ পর্যন্ত)"""
-        df = self.read_all()
-        if df.empty or "Number" not in df.columns:
-            return []
-        numbers = df["Number"].dropna().astype(int).tolist()
-        if len(numbers) > 300:
-            numbers = numbers[-300:]
-        return numbers
-
-    def get_recent_history(self, limit=300) -> List[tuple]:
-        """সর্বশেষ limit টি রাউন্ডের ডেটা টাপল আকারে (period, number, size, prediction, result, range_pred)"""
-        df = self.read_all()
-        if df.empty:
-            return []
-        if len(df) > limit:
-            df = df.tail(limit)
-        rows = []
-        for _, row in df.iterrows():
-            period = str(row.get("Issue", ""))
-            number = int(row.get("Number", 0)) if pd.notna(row.get("Number")) else None
-            size = row.get("Size", "")
-            prediction = row.get("Prediction", "") if "Prediction" in df.columns else None
-            result = row.get("Outcome", "") if "Outcome" in df.columns else None
-            range_pred = row.get("Range_Pred", "") if "Range_Pred" in df.columns else None
-            rows.append((period, number, size, prediction, result, range_pred))
-        return rows
-
-
-# ==================== গ্লোবাল এক্সেল ম্যানেজার ====================
-excel_manager = ExcelDataManager(EXCEL_FILE, SHEET_NAME)
-
-
-# ==================== ডেটা ফাংশন (bot.py-র পুরোনো ইন্টারফেস) ====================
 def save_round(period, number, size, prediction, result, range_pred):
-    """এক্সেল ফাইলে নতুন রাউন্ড সেভ করে"""
-    # Color নির্ধারণ (আপনার ডেটার সাথে মিলিয়ে নিন)
-    if number in [0, 1, 3, 7, 9]:
-        color = "Green"
-    elif number in [2, 4, 6, 8]:
-        color = "Red"
-    else:
-        color = "Viet"  # 5 এর জন্য Viet
-
-    row = {
-        "Issue": str(period),
-        "Number": number,
-        "Color": color,
-        "Size": size,
-        "Premium": number,
-        "Sum": 0,
-        "Block ID": "",
-        "Block Number": 0,
-        "Block Timestamp": 0,
-        "Outcome": result if result else "",
-        "Running Pattern": "",
-        "Created At": time.strftime("%Y-%m-%d %H:%M:%S")
-    }
-    excel_manager.append_row(row)
+    conn = sqlite3.connect('predictions.db')
+    c = conn.cursor()
+    c.execute('''INSERT OR REPLACE INTO rounds (period, number, size, prediction, result, range_pred)
+                 VALUES (?, ?, ?, ?, ?, ?)''', (period, number, size, prediction, result, range_pred))
+    conn.commit()
+    conn.close()
 
 def load_recent_history(limit=300):
-    """এক্সেল থেকে সর্বশেষ ৩০০টি রাউন্ডের ডেটা টাপল আকারে রিটার্ন করে"""
-    return excel_manager.get_recent_history(limit)
+    conn = sqlite3.connect('predictions.db')
+    c = conn.cursor()
+    try:
+        c.execute('''SELECT period, number, size, prediction, result, range_pred FROM rounds
+                     ORDER BY period DESC LIMIT ?''', (limit,))
+        rows = c.fetchall()
+    except sqlite3.OperationalError:
+        c.execute('''SELECT period, number, size, prediction, result FROM rounds
+                     ORDER BY period DESC LIMIT ?''', (limit,))
+        rows = [(r[0], r[1], r[2], r[3], r[4], None) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+init_db()
 
 
-# ==================== UI ফরম্যাটিং (অপরিবর্তিত) ====================
+# ==================== ইউটিলিটি ফাংশন (HTTP কলের জন্য) ====================
+def http_get_json(url, timeout=10):
+    """urllib দিয়ে GET করে JSON রিটার্ন করে"""
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            data = response.read().decode('utf-8')
+            return json.loads(data)
+    except Exception as e:
+        print(f"HTTP GET Error: {e}")
+        return None
+
+def http_post_json(url, payload, timeout=10):
+    """urllib দিয়ে POST (JSON) করে"""
+    try:
+        data = json.dumps(payload).encode('utf-8')
+        req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return response.read().decode('utf-8')
+    except Exception as e:
+        print(f"HTTP POST Error: {e}")
+        return None
+
+
+# ==================== UI ফরম্যাটিং ====================
 def format_prediction_ui(pred_data, period):
     size = pred_data["size"]
     conf = pred_data["confidence"]
@@ -233,7 +177,7 @@ def format_result_ui(period, number, actual_size, result, pred, range_pred):
     return ui
 
 
-# ==================== প্রেডিক্টর ক্লাস (অপরিবর্তিত) ====================
+# ==================== প্রেডিক্টর ক্লাস ====================
 class Predictor:
     def __init__(self):
         self.history = deque(maxlen=300)
@@ -254,9 +198,9 @@ class Predictor:
     def fetch_data(self):
         try:
             ts = int(time.time() * 1000)
-            r = requests.get(API_URL.format(ts), timeout=10)
-            if r.status_code == 200:
-                return r.json().get("data", {}).get("list", [])
+            data = http_get_json(API_URL.format(ts), timeout=10)
+            if data:
+                return data.get("data", {}).get("list", [])
         except:
             pass
         return []
@@ -495,7 +439,9 @@ class Predictor:
     def send_message(self, text):
         if self.chat_id:
             try:
-                requests.post(TELEGRAM_API + "sendMessage", json={"chat_id": self.chat_id, "text": text, "parse_mode": "HTML"}, timeout=10)
+                url = TELEGRAM_API + "sendMessage"
+                payload = {"chat_id": self.chat_id, "text": text, "parse_mode": "HTML"}
+                http_post_json(url, payload, timeout=10)
             except:
                 pass
 
@@ -582,18 +528,21 @@ def get_updates(offset=None):
     if offset:
         params["offset"] = offset
     try:
-        r = requests.get(url, params=params, timeout=35)
-        if r.status_code == 200:
-            return r.json().get("result", [])
+        # urllib দিয়ে GET-এ প্যারামিটার পাঠানো
+        query_string = urllib.parse.urlencode(params)
+        full_url = url + "?" + query_string
+        data = http_get_json(full_url, timeout=35)
+        if data:
+            return data.get("result", [])
     except:
         pass
     return []
 
 def main():
     global last_update_id
-    print("🤖 বট চালু হচ্ছে... (Excel-based v2.0)")
+    print("🤖 বট চালু হচ্ছে... (Pure Standard Library)")
     print("📊 LEVEL 1 (≥92%) | LEVEL 2 (≥85%)")
-    print(f"📁 ডেটা সংরক্ষণ: {EXCEL_FILE} -> শিট: {SHEET_NAME}")
+    print("📁 ডেটা সংরক্ষণ: predictions.db (SQLite)")
     print("🔐 অথেন্টিকেশন সক্রিয় (শুধু অনুমোদিত ইউজার)")
 
     while True:
@@ -608,7 +557,7 @@ def main():
 
                     # অথেন্টিকেশন চেক
                     if not is_authorized(user_id):
-                        requests.post(TELEGRAM_API + "sendMessage", json={
+                        http_post_json(TELEGRAM_API + "sendMessage", {
                             "chat_id": chat_id,
                             "text": "⛔ *আপনি অথরাইজড নন!*\nঅ্যাডমিনের সাথে যোগাযোগ করুন।",
                             "parse_mode": "Markdown"
@@ -624,9 +573,9 @@ def main():
                                 [{"text": "📞 CONTACT", "url": "https://t.me/your_username"}]
                             ]
                         }
-                        requests.post(TELEGRAM_API + "sendMessage", json={
+                        http_post_json(TELEGRAM_API + "sendMessage", {
                             "chat_id": chat_id,
-                            "text": "🤖 *SUBHA v2.0 (Excel-based)*\n\n✅ প্রতি পিরিয়ডে প্রেডিকশন\n✅ LEVEL 1 (≥92%) | LEVEL 2 (≥85%)\n✅ ডেটা এক্সেল ফাইলে সেভ হয়\n\nনিচের বোতাম চাপুন।",
+                            "text": "🤖 *SUBHA v3.0 (Pure Python)*\n\n✅ প্রতি পিরিয়ডে প্রেডিকশন\n✅ LEVEL 1 (≥92%) | LEVEL 2 (≥85%)\n✅ ডেটা SQLite-তে সেভ হয়\n\nনিচের বোতাম চাপুন।",
                             "reply_markup": keyboard,
                             "parse_mode": "Markdown"
                         }, timeout=10)
@@ -637,11 +586,10 @@ def main():
                     user_id = cb["from"]["id"]
                     data = cb["data"]
                     cb_id = cb["id"]
-                    requests.post(TELEGRAM_API + "answerCallbackQuery", json={"callback_query_id": cb_id}, timeout=5)
+                    http_post_json(TELEGRAM_API + "answerCallbackQuery", {"callback_query_id": cb_id}, timeout=5)
 
-                    # অথেন্টিকেশন চেক
                     if not is_authorized(user_id):
-                        requests.post(TELEGRAM_API + "sendMessage", json={
+                        http_post_json(TELEGRAM_API + "sendMessage", {
                             "chat_id": chat_id,
                             "text": "⛔ আপনি অথরাইজড নন।",
                         }, timeout=10)
