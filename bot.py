@@ -1,5 +1,4 @@
-# ==================== সম্পূর্ণ কোড (শুধু বিল্ট-ইন লাইব্রেরি) ====================
-# auth.py + db.py (SQLite) + bot.py (urllib দিয়ে)
+# ==================== সম্পূর্ণ কোড (শুধু বিল্ট-ইন লাইব্রেরি + ডেটা ভিউ) ====================
 
 import time
 import threading
@@ -8,6 +7,9 @@ import sqlite3
 import json
 import urllib.request
 import urllib.error
+import urllib.parse
+import csv
+import io
 from collections import deque, Counter
 from typing import Optional, List, Dict, Any
 
@@ -18,7 +20,7 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}/"
 
 # ==================== auth.py ====================
 AUTHORIZED_USER_IDS = {
-    7237785856,  # ← আপনার টেলিগ্রাম আইডি দিন
+    5824157133,  # ← আপনার টেলিগ্রাম আইডি দিন
     987654321,
 }
 
@@ -40,9 +42,13 @@ def init_db():
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS rounds
                  (period TEXT PRIMARY KEY, number INTEGER, size TEXT,
-                  prediction TEXT, result TEXT, range_pred TEXT)''')
+                  prediction TEXT, result TEXT, range_pred TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     try:
         c.execute("ALTER TABLE rounds ADD COLUMN range_pred TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute("ALTER TABLE rounds ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
     except sqlite3.OperationalError:
         pass
     conn.commit()
@@ -51,8 +57,9 @@ def init_db():
 def save_round(period, number, size, prediction, result, range_pred):
     conn = sqlite3.connect('predictions.db')
     c = conn.cursor()
-    c.execute('''INSERT OR REPLACE INTO rounds (period, number, size, prediction, result, range_pred)
-                 VALUES (?, ?, ?, ?, ?, ?)''', (period, number, size, prediction, result, range_pred))
+    c.execute('''INSERT OR REPLACE INTO rounds (period, number, size, prediction, result, range_pred, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)''', 
+                 (period, number, size, prediction, result, range_pred))
     conn.commit()
     conn.close()
 
@@ -69,6 +76,25 @@ def load_recent_history(limit=300):
         rows = [(r[0], r[1], r[2], r[3], r[4], None) for r in c.fetchall()]
     conn.close()
     return rows
+
+def get_all_data(limit=50):
+    """সর্বশেষ limit টি ডেটা রিটার্ন করে"""
+    conn = sqlite3.connect('predictions.db')
+    c = conn.cursor()
+    c.execute('''SELECT period, number, size, prediction, result, range_pred, created_at 
+                 FROM rounds ORDER BY period DESC LIMIT ?''', (limit,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def get_total_count():
+    """মোট কতটি রাউন্ডের ডেটা আছে"""
+    conn = sqlite3.connect('predictions.db')
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM rounds")
+    count = c.fetchone()[0]
+    conn.close()
+    return count
 
 init_db()
 
@@ -175,6 +201,45 @@ def format_result_ui(period, number, actual_size, result, pred, range_pred):
 ━━━━━━━━━━━━━━━━━━━━━━
 """
     return ui
+
+def format_data_table(rows, total_count):
+    """ডেটা টেবিল ফরম্যাট করে"""
+    if not rows:
+        return "📭 এখনো কোনো ডেটা নেই।"
+    
+    text = f"📊 *সর্বশেষ {len(rows)} টি ডেটা* (মোট: {total_count})\n"
+    text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    text += "```\n"
+    text += f"{'Period':<20} {'Num':<5} {'Size':<7} {'Pred':<7} {'Result':<6} {'Range':<10}\n"
+    text += "-" * 60 + "\n"
+    
+    for row in rows[:20]:  # শুধু ২০টি দেখাব
+        period = str(row[0])[-12:]  # শুধু শেষ ১২ ডিজিট
+        number = str(row[1]) if row[1] is not None else "-"
+        size = str(row[2]) if row[2] else "-"
+        pred = str(row[3]) if row[3] else "-"
+        result = str(row[4]) if row[4] else "-"
+        range_pred = str(row[5]) if row[5] else "-"
+        text += f"{period:<20} {number:<5} {size:<7} {pred:<7} {result:<6} {range_pred:<10}\n"
+    
+    text += "```\n"
+    text += f"\n📌 *মোট ডেটা:* {total_count} টি রাউন্ড"
+    text += "\n💡 *ডাউনলোড করতে:* /download_data"
+    return text
+
+def generate_csv():
+    """CSV ডেটা তৈরি করে"""
+    rows = get_all_data(limit=1000)  # সর্বশেষ ১০০০টি
+    if not rows:
+        return None
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['Period', 'Number', 'Size', 'Prediction', 'Result', 'Range_Pred', 'Created_At'])
+    for row in rows:
+        writer.writerow(row)
+    
+    return output.getvalue()
 
 
 # ==================== প্রেডিক্টর ক্লাস ====================
@@ -440,10 +505,40 @@ class Predictor:
         if self.chat_id:
             try:
                 url = TELEGRAM_API + "sendMessage"
-                payload = {"chat_id": self.chat_id, "text": text, "parse_mode": "HTML"}
+                payload = {"chat_id": self.chat_id, "text": text, "parse_mode": "Markdown"}
                 http_post_json(url, payload, timeout=10)
             except:
                 pass
+
+    def send_document(self, filename, content):
+        """CSV ফাইল ডাউনলোডের জন্য"""
+        if self.chat_id:
+            try:
+                url = TELEGRAM_API + "sendDocument"
+                boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
+                
+                # মাল্টিপার্ট ফর্ম ডেটা তৈরি
+                body = (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="chat_id"\r\n\r\n'
+                    f"{self.chat_id}\r\n"
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="document"; filename="{filename}"\r\n'
+                    f"Content-Type: text/csv\r\n\r\n"
+                    f"{content}\r\n"
+                    f"--{boundary}--\r\n"
+                )
+                
+                req = urllib.request.Request(
+                    url,
+                    data=body.encode('utf-8'),
+                    headers={'Content-Type': f'multipart/form-data; boundary={boundary}'}
+                )
+                with urllib.request.urlopen(req, timeout=30) as response:
+                    return response.read()
+            except Exception as e:
+                print(f"Send document error: {e}")
+                self.send_message("❌ ফাইল পাঠাতে সমস্যা হয়েছে।")
 
     def start(self, chat_id):
         if self.running:
@@ -528,7 +623,6 @@ def get_updates(offset=None):
     if offset:
         params["offset"] = offset
     try:
-        # urllib দিয়ে GET-এ প্যারামিটার পাঠানো
         query_string = urllib.parse.urlencode(params)
         full_url = url + "?" + query_string
         data = http_get_json(full_url, timeout=35)
@@ -540,10 +634,11 @@ def get_updates(offset=None):
 
 def main():
     global last_update_id
-    print("🤖 বট চালু হচ্ছে... (Pure Standard Library)")
+    print("🤖 বট চালু হচ্ছে... (Pure Standard Library + Data View)")
     print("📊 LEVEL 1 (≥92%) | LEVEL 2 (≥85%)")
     print("📁 ডেটা সংরক্ষণ: predictions.db (SQLite)")
     print("🔐 অথেন্টিকেশন সক্রিয় (শুধু অনুমোদিত ইউজার)")
+    print("📊 ডেটা দেখতে: /show_data বা /download_data")
 
     while True:
         try:
@@ -554,6 +649,7 @@ def main():
                 if msg:
                     chat_id = msg["chat"]["id"]
                     user_id = msg["from"]["id"]
+                    text = msg.get("text", "")
 
                     # অথেন্টিকেশন চেক
                     if not is_authorized(user_id):
@@ -564,21 +660,46 @@ def main():
                         }, timeout=10)
                         continue
 
-                    if msg.get("text") == "/start":
+                    # /start কমান্ড
+                    if text == "/start":
                         keyboard = {
                             "inline_keyboard": [
                                 [{"text": "▶️ START", "callback_data": "start"}],
                                 [{"text": "⏹ STOP", "callback_data": "stop"}],
                                 [{"text": "📊 STATUS", "callback_data": "status"}],
+                                [{"text": "📊 SHOW DATA", "callback_data": "show_data"}],
                                 [{"text": "📞 CONTACT", "url": "https://t.me/your_username"}]
                             ]
                         }
                         http_post_json(TELEGRAM_API + "sendMessage", {
                             "chat_id": chat_id,
-                            "text": "🤖 *SUBHA v3.0 (Pure Python)*\n\n✅ প্রতি পিরিয়ডে প্রেডিকশন\n✅ LEVEL 1 (≥92%) | LEVEL 2 (≥85%)\n✅ ডেটা SQLite-তে সেভ হয়\n\nনিচের বোতাম চাপুন।",
+                            "text": "🤖 *SUBHA v3.0 (Pure Python)*\n\n✅ প্রতি পিরিয়ডে প্রেডিকশন\n✅ LEVEL 1 (≥92%) | LEVEL 2 (≥85%)\n✅ ডেটা SQLite-তে সেভ হয়\n✅ /show_data - ডেটা দেখুন\n✅ /download_data - CSV ডাউনলোড\n\nনিচের বোতাম চাপুন।",
                             "reply_markup": keyboard,
                             "parse_mode": "Markdown"
                         }, timeout=10)
+                    
+                    # /show_data কমান্ড
+                    elif text == "/show_data":
+                        rows = get_all_data(limit=50)
+                        total = get_total_count()
+                        response = format_data_table(rows, total)
+                        http_post_json(TELEGRAM_API + "sendMessage", {
+                            "chat_id": chat_id,
+                            "text": response,
+                            "parse_mode": "Markdown"
+                        }, timeout=10)
+                    
+                    # /download_data কমান্ড
+                    elif text == "/download_data":
+                        csv_data = generate_csv()
+                        if csv_data:
+                            predictor.chat_id = chat_id
+                            predictor.send_document("predictions_data.csv", csv_data)
+                        else:
+                            http_post_json(TELEGRAM_API + "sendMessage", {
+                                "chat_id": chat_id,
+                                "text": "❌ কোনো ডেটা নেই।",
+                            }, timeout=10)
 
                 cb = update.get("callback_query")
                 if cb:
@@ -606,6 +727,16 @@ def main():
                         stats = (f"📊 *পরিসংখ্যান*\n✅ জয়: {predictor.wins}\n❌ হার: {predictor.losses}\n"
                                  f"🔥 স্ট্রিক: {predictor.streak}\n🏆 সেরা: {predictor.best_streak}\n📈 মোট: {predictor.total_predictions}")
                         predictor.send_message(stats)
+                    elif data == "show_data":
+                        rows = get_all_data(limit=50)
+                        total = get_total_count()
+                        response = format_data_table(rows, total)
+                        http_post_json(TELEGRAM_API + "sendMessage", {
+                            "chat_id": chat_id,
+                            "text": response,
+                            "parse_mode": "Markdown"
+                        }, timeout=10)
+
             time.sleep(1)
         except Exception as e:
             print("Main error:", e)
