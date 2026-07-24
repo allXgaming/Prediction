@@ -1,4 +1,5 @@
-# ==================== সম্পূর্ণ কোড (শুধু বিল্ট-ইন লাইব্রেরি + ডেটা ভিউ) ====================
+# ==================== সম্পূর্ণ কোড (Python 3.6+ compatible) ====================
+# auth.py + db.py (SQLite) + bot.py (urllib দিয়ে) + Data View
 
 import time
 import threading
@@ -16,7 +17,7 @@ from typing import Optional, List, Dict, Any
 # ---------- কনফিগারেশন ----------
 API_URL = "https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json?ts={}"
 BOT_TOKEN = "7768747736:AAHRFAiemrbWwo2aCY0geWyBBY385gPJcZ8"   # আপনার টোকেন দিন
-TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}/"
+TELEGRAM_API = "https://api.telegram.org/bot{}/".format(BOT_TOKEN)
 
 # ==================== auth.py ====================
 AUTHORIZED_USER_IDS = {
@@ -24,15 +25,15 @@ AUTHORIZED_USER_IDS = {
     987654321,
 }
 
-def is_authorized(user_id: int | None) -> bool:
+def is_authorized(user_id):
     if user_id is None:
         return False
     return user_id in AUTHORIZED_USER_IDS
 
-def add_authorized_user(user_id: int) -> None:
+def add_authorized_user(user_id):
     AUTHORIZED_USER_IDS.add(user_id)
 
-def remove_authorized_user(user_id: int) -> None:
+def remove_authorized_user(user_id):
     AUTHORIZED_USER_IDS.discard(user_id)
 
 
@@ -108,7 +109,7 @@ def http_get_json(url, timeout=10):
             data = response.read().decode('utf-8')
             return json.loads(data)
     except Exception as e:
-        print(f"HTTP GET Error: {e}")
+        print("HTTP GET Error:", e)
         return None
 
 def http_post_json(url, payload, timeout=10):
@@ -119,7 +120,7 @@ def http_post_json(url, payload, timeout=10):
         with urllib.request.urlopen(req, timeout=timeout) as response:
             return response.read().decode('utf-8')
     except Exception as e:
-        print(f"HTTP POST Error: {e}")
+        print("HTTP POST Error:", e)
         return None
 
 
@@ -145,13 +146,13 @@ def format_prediction_ui(pred_data, period):
     big_bar = "█" * int(big_pct / 10) + "░" * (10 - int(big_pct / 10))
     small_bar = "█" * int(small_pct / 10) + "░" * (10 - int(small_pct / 10))
     
-    ui = f"""
+    ui = """
 ━━━━━━━━━━━━━━━━━━━━━━
 🧠 AI ANALYSIS
 ━━━━━━━━━━━━━━━━━━━━━━
-📈 MA           : {ma_val}
-📊 RSI          : {rsi_val:.1f}
-📉 STD DEV      : {std_val}
+📈 MA           : {ma}
+📊 RSI          : {rsi:.1f}
+📉 STD DEV      : {std}
 🔄 PATTERN      : {pattern}
 🎯 CYCLE        : {cycle}
 
@@ -180,7 +181,10 @@ def format_prediction_ui(pred_data, period):
 🧠 ENGINE    : SUBHA AI
 🔥 MODE      : LIVE
 ━━━━━━━━━━━━━━━━━━━━━━
-"""
+""".format(ma=ma_val, rsi=rsi_val, std=std_val, pattern=pattern, cycle=cycle,
+           big_bar=big_bar, big_pct=big_pct, small_bar=small_bar, small_pct=small_pct,
+           size_emoji=size_emoji, size=size, conf=conf, signal=signal, volatility=volatility,
+           risk=risk, period=period, num_range=num_range, level=level)
     return ui
 
 def format_result_ui(period, number, actual_size, result, pred, range_pred):
@@ -189,7 +193,7 @@ def format_result_ui(period, number, actual_size, result, pred, range_pred):
     else:
         status_emoji, status_text, bg = "❌", "LOSS 😞", "🔴"
     actual_emoji = "🐘" if actual_size == "BIG" else "🐭"
-    ui = f"""
+    ui = """
 {status_emoji} {status_text}  {bg}
 ━━━━━━━━━━━━━━━━━━━━━━
 📊 RESULT
@@ -199,7 +203,9 @@ def format_result_ui(period, number, actual_size, result, pred, range_pred):
 ✅ ACTUAL    : {actual_emoji} {actual_size} [{number}]
 📊 RANGE     : {range_pred}
 ━━━━━━━━━━━━━━━━━━━━━━
-"""
+""".format(status_emoji=status_emoji, status_text=status_text, bg=bg,
+           period=period, pred=pred, actual_emoji=actual_emoji,
+           actual_size=actual_size, number=number, range_pred=range_pred)
     return ui
 
 def format_data_table(rows, total_count):
@@ -207,10 +213,10 @@ def format_data_table(rows, total_count):
     if not rows:
         return "📭 এখনো কোনো ডেটা নেই।"
     
-    text = f"📊 *সর্বশেষ {len(rows)} টি ডেটা* (মোট: {total_count})\n"
+    text = "📊 *সর্বশেষ {limit} টি ডেটা* (মোট: {total})\n".format(limit=len(rows), total=total_count)
     text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     text += "```\n"
-    text += f"{'Period':<20} {'Num':<5} {'Size':<7} {'Pred':<7} {'Result':<6} {'Range':<10}\n"
+    text += "{:<20} {:<5} {:<7} {:<7} {:<6} {:<10}\n".format("Period", "Num", "Size", "Pred", "Result", "Range")
     text += "-" * 60 + "\n"
     
     for row in rows[:20]:  # শুধু ২০টি দেখাব
@@ -220,10 +226,10 @@ def format_data_table(rows, total_count):
         pred = str(row[3]) if row[3] else "-"
         result = str(row[4]) if row[4] else "-"
         range_pred = str(row[5]) if row[5] else "-"
-        text += f"{period:<20} {number:<5} {size:<7} {pred:<7} {result:<6} {range_pred:<10}\n"
+        text += "{:<20} {:<5} {:<7} {:<7} {:<6} {:<10}\n".format(period, number, size, pred, result, range_pred)
     
     text += "```\n"
-    text += f"\n📌 *মোট ডেটা:* {total_count} টি রাউন্ড"
+    text += "\n📌 *মোট ডেটা:* {total} টি রাউন্ড".format(total=total_count)
     text += "\n💡 *ডাউনলোড করতে:* /download_data"
     return text
 
@@ -246,8 +252,13 @@ def generate_csv():
 class Predictor:
     def __init__(self):
         self.history = deque(maxlen=300)
-        self.wins, self.losses, self.streak, self.best_streak, self.total_predictions = 0, 0, 0, 0, 0
-        self.running, self.chat_id = False, None
+        self.wins = 0
+        self.losses = 0
+        self.streak = 0
+        self.best_streak = 0
+        self.total_predictions = 0
+        self.running = False
+        self.chat_id = None
         self.load_from_db()
 
     def load_from_db(self):
@@ -272,17 +283,26 @@ class Predictor:
 
     # ---------- ইন্ডিকেটর ----------
     def ma(self, data, w):
-        return sum(data[-w:]) / w if len(data) >= w else sum(data) / len(data) if data else 0
+        if len(data) >= w:
+            return sum(data[-w:]) / w
+        elif data:
+            return sum(data) / len(data)
+        return 0
 
     def rsi(self, data, w=14):
         if len(data) < w + 1:
             return 50
-        g, l = 0, 0
+        g = 0
+        l = 0
         for i in range(1, w + 1):
             d = data[-i] - data[-i-1]
-            g += d if d > 0 else 0
-            l += abs(d) if d < 0 else 0
-        return 100 - (100 / (1 + (g / l))) if l != 0 else 100
+            if d > 0:
+                g += d
+            else:
+                l += abs(d)
+        if l == 0:
+            return 100
+        return 100 - (100 / (1 + (g / l)))
 
     def std_dev(self, data, w=20):
         if len(data) < w:
@@ -320,7 +340,7 @@ class Predictor:
             if len(nums) >= 2:
                 cnt = Counter(nums)
                 top = cnt.most_common(2)
-                rng = f"{top[0][0]} • {top[1][0]}"
+                rng = str(top[0][0]) + " • " + str(top[1][0])
             else:
                 rng = "5 • 9" if pred == "BIG" else "0 • 4"
             return pred, conf, rng, "STRONG BULLISH", 72, "LOW", "DRAGON", "STABLE", 95, 5
@@ -333,7 +353,7 @@ class Predictor:
             if len(nums) >= 2:
                 cnt = Counter(nums)
                 top = cnt.most_common(2)
-                rng = f"{top[0][0]} • {top[1][0]}"
+                rng = str(top[0][0]) + " • " + str(top[1][0])
             else:
                 rng = "5 • 9" if pred == "BIG" else "0 • 4"
             return pred, conf, rng, "BULLISH", 68, "LOW", "4-STREAK", "STABLE", 90, 10
@@ -346,7 +366,7 @@ class Predictor:
             if len(nums) >= 2:
                 cnt = Counter(nums)
                 top = cnt.most_common(2)
-                rng = f"{top[0][0]} • {top[1][0]}"
+                rng = str(top[0][0]) + " • " + str(top[1][0])
             else:
                 rng = "5 • 9" if pred == "BIG" else "0 • 4"
             return pred, conf, rng, "BEARISH", 55, "MEDIUM", "3-STREAK BREAK", "UNSTABLE", 75, 25
@@ -359,7 +379,7 @@ class Predictor:
             if len(nums) >= 2:
                 cnt = Counter(nums)
                 top = cnt.most_common(2)
-                rng = f"{top[0][0]} • {top[1][0]}"
+                rng = str(top[0][0]) + " • " + str(top[1][0])
             else:
                 rng = "5 • 9" if pred == "BIG" else "0 • 4"
             return pred, conf, rng, "NEUTRAL", 52, "MEDIUM", "2-STREAK BREAK", "STABLE", 70, 30
@@ -380,7 +400,7 @@ class Predictor:
             if len(nums) >= 2:
                 cnt = Counter(nums)
                 top = cnt.most_common(2)
-                rng = f"{top[0][0]} • {top[1][0]}"
+                rng = str(top[0][0]) + " • " + str(top[1][0])
             else:
                 rng = "5 • 9" if pred == "BIG" else "0 • 4"
             return pred, conf, rng, "BULLISH", 65, "LOW", "ALTERNATING 8", "STABLE", 85, 15
@@ -393,7 +413,7 @@ class Predictor:
             if len(nums) >= 2:
                 cnt = Counter(nums)
                 top = cnt.most_common(2)
-                rng = f"{top[0][0]} • {top[1][0]}"
+                rng = str(top[0][0]) + " • " + str(top[1][0])
             else:
                 rng = "5 • 9" if pred == "BIG" else "0 • 4"
             return pred, conf, rng, "BULLISH", 60, "LOW", "ALTERNATING 6", "STABLE", 80, 20
@@ -406,7 +426,7 @@ class Predictor:
             if len(nums) >= 2:
                 cnt = Counter(nums)
                 top = cnt.most_common(2)
-                rng = f"{top[0][0]} • {top[1][0]}"
+                rng = str(top[0][0]) + " • " + str(top[1][0])
             else:
                 rng = "5 • 9" if pred == "BIG" else "0 • 4"
             return pred, conf, rng, "NEUTRAL", 55, "MEDIUM", "TRAP", "STABLE", 72, 28
@@ -470,7 +490,7 @@ class Predictor:
         if len(nums) >= 2:
             cnt = Counter(nums)
             top = cnt.most_common(2)
-            rng = f"{top[0][0]} • {top[1][0]}"
+            rng = str(top[0][0]) + " • " + str(top[1][0])
         else:
             rng = "5 • 9" if pred == "BIG" else "0 • 4"
 
@@ -495,7 +515,8 @@ class Predictor:
         if won:
             self.wins += 1
             self.streak += 1
-            self.best_streak = max(self.best_streak, self.streak)
+            if self.streak > self.best_streak:
+                self.best_streak = self.streak
         else:
             self.losses += 1
             self.streak = 0
@@ -517,33 +538,31 @@ class Predictor:
                 url = TELEGRAM_API + "sendDocument"
                 boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
                 
-                # মাল্টিপার্ট ফর্ম ডেটা তৈরি
-                body = (
-                    f"--{boundary}\r\n"
-                    f'Content-Disposition: form-data; name="chat_id"\r\n\r\n'
-                    f"{self.chat_id}\r\n"
-                    f"--{boundary}\r\n"
-                    f'Content-Disposition: form-data; name="document"; filename="{filename}"\r\n'
-                    f"Content-Type: text/csv\r\n\r\n"
-                    f"{content}\r\n"
-                    f"--{boundary}--\r\n"
-                )
+                body = "--{boundary}\r\n".format(boundary=boundary)
+                body += 'Content-Disposition: form-data; name="chat_id"\r\n\r\n'
+                body += "{chat_id}\r\n".format(chat_id=self.chat_id)
+                body += "--{boundary}\r\n".format(boundary=boundary)
+                body += 'Content-Disposition: form-data; name="document"; filename="{filename}"\r\n'.format(filename=filename)
+                body += "Content-Type: text/csv\r\n\r\n"
+                body += "{content}\r\n".format(content=content)
+                body += "--{boundary}--\r\n".format(boundary=boundary)
                 
                 req = urllib.request.Request(
                     url,
                     data=body.encode('utf-8'),
-                    headers={'Content-Type': f'multipart/form-data; boundary={boundary}'}
+                    headers={'Content-Type': 'multipart/form-data; boundary=' + boundary}
                 )
                 with urllib.request.urlopen(req, timeout=30) as response:
                     return response.read()
             except Exception as e:
-                print(f"Send document error: {e}")
+                print("Send document error:", e)
                 self.send_message("❌ ফাইল পাঠাতে সমস্যা হয়েছে।")
 
     def start(self, chat_id):
         if self.running:
             return
-        self.running, self.chat_id = True, chat_id
+        self.running = True
+        self.chat_id = chat_id
         self.send_message("✅ প্রেডিকশন শুরু! (শুধু LEVEL 1-2: ≥85%)")
         threading.Thread(target=self._loop, daemon=True).start()
 
@@ -724,8 +743,9 @@ def main():
                     elif data == "stop":
                         predictor.stop()
                     elif data == "status":
-                        stats = (f"📊 *পরিসংখ্যান*\n✅ জয়: {predictor.wins}\n❌ হার: {predictor.losses}\n"
-                                 f"🔥 স্ট্রিক: {predictor.streak}\n🏆 সেরা: {predictor.best_streak}\n📈 মোট: {predictor.total_predictions}")
+                        stats = "📊 *পরিসংখ্যান*\n✅ জয়: {wins}\n❌ হার: {losses}\n🔥 স্ট্রিক: {streak}\n🏆 সেরা: {best}\n📈 মোট: {total}".format(
+                            wins=predictor.wins, losses=predictor.losses, streak=predictor.streak,
+                            best=predictor.best_streak, total=predictor.total_predictions)
                         predictor.send_message(stats)
                     elif data == "show_data":
                         rows = get_all_data(limit=50)
